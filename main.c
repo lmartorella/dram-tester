@@ -24,6 +24,7 @@
 
 #define ROW_SIZE 128
 #define ROW_COUNT 128
+#define ROW_COUNT_MASK 128
 
 typedef unsigned char BYTE;
 
@@ -31,76 +32,114 @@ extern void display_init();
 extern void display_logTest(const char* text);
 extern void display_logStatus(const char* text);
 
-static void testRow(BYTE row, BYTE startData, BYTE deltaData) {
-    char buf[16];
-    sprintf(buf, "..R %x", row);
-    display_logStatus(buf);
+static char buf[16];
 
+// Should require less than 2ms (max refresh perdiod): max 70 instructions per cell
+static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
     BYTE data = startData;
     
-    // Page mode write cycle (from 4116 datasheet)
+    // Page mode write cycle with early write
     // Use early write to avoid contention: DI and DO are shorted
     ADDR_PORT = row;    
+    NOP();  // Stabilize ADDR (long wires)
     RAS = 0;
-    NOP();
-    NOP();
 
+    // Write mode for the whole row
     DATA_PORT_T = 0;
-
     for (BYTE col = 0; col < ROW_SIZE; col++) {
+        // Prepare both addr and data
         ADDR_PORT = col;    
         DATA_PORT = data;
-        NOP();
-        NOP();        
-
+        // Early write
         WRITE = 0;
         NOP();
+
+        // Strobe cas and sample data
         CAS = 0;
         NOP();
-        NOP();
 
+        // Deassert both lines
         WRITE = 1;
-        NOP();
-        NOP();
         CAS = 1;
         
         data += deltaData;
-        __delay_us(1);
     } 
 
+    // End write
     DATA_PORT_T = 1;
     RAS = 1;
+}
 
-    __delay_us(1);
-    
+// Should require less than 2ms (max refresh perdiod): max 70 instructions per cell
+static void testRow(BYTE row, BYTE startData, BYTE deltaData) {    
     // Page mode read cycle
     ADDR_PORT = row;    
+    NOP();  // Stabilize ADDR (long wires)
     RAS = 0;
-    NOP();
-    NOP();
+    WRITE = 1;
 
-    data = startData;
-
+    BYTE data = startData;
     for (BYTE col = 0; col < ROW_SIZE; col++) {
         ADDR_PORT = col;    
-        NOP();
-        NOP();
+        NOP();  // Stabilize ADDR (long wires)
         CAS = 0;
-        NOP();
-        NOP();
-        
+        NOP();     
         BYTE d = DATA_PORT;
         CAS = 1;
         
         if (d != data) {
             sprintf(buf, "!R%x C%x ~%x", row, col, d);
             display_logStatus(buf);
+            // stop
             while (1);
         }
         data += deltaData;
-        __delay_us(1);
     } 
     RAS = 1;
+}
+
+static void refreshAll(BYTE row) {
+    for (BYTE i = 0; i < ROW_COUNT; i++, row++) {
+        row = row & ROW_COUNT_MASK;
+        // Do refresh
+        ADDR_PORT = row;   
+        NOP();  // Stabilize ADDR (long wires)
+        RAS = 0;
+        NOP();
+        RAS = 1;
+        NOP();
+    }
+}
+
+static void refreshAndWait(BYTE c) {
+    for (BYTE i = 0; i < c; i++) {
+        refreshAll(0);
+        __delay_ms(2);
+    }
+}
+
+static void testAll(BYTE startData, BYTE deltaData) {
+    for (BYTE row = 0; row < ROW_COUNT; row++) {
+        sprintf(buf, "..W %x", row);
+        display_logStatus(buf);
+        writeRow(row, startData, deltaData);
+
+        // Refresh whole rows starting from the next one
+        refreshAll(row + 1);
+    }
+
+    // Test memory persistence
+    // Wait for 256 full refresh cycles (512ms)
+    refreshAndWait(255);
+
+    for (BYTE row = 0; row < ROW_COUNT; row++) {
+        sprintf(buf, "..R %x", row);
+        display_logStatus(buf);
+        testRow(row, startData, deltaData);
+
+        // Refresh whole rows starting from the next one
+        refreshAll(row + 1);
+    }
 }
 
 void main(void) {
@@ -114,38 +153,30 @@ void main(void) {
     OPTION_REGbits.nRBPU = 0; // Pullup to read 1 in case of no RAM
 
     display_init();
-        
-    display_logTest("All 0's");   
-    // Test all 0's
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        testRow(row, 0, 0);
-    }
-
-    display_logTest("All 1's");   
-    // Test all 0's
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        testRow(row, 0xff, 0);
-    }
-
-    display_logTest("0x55 pattern");   
-    // Test all 0's
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        testRow(row, 0x55, 0);
-    }
-
-    display_logTest("0xAA pattern");   
-    // Test all 0's
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        testRow(row, 0xAA, 0);
-    }
-
-    display_logTest("+1 pattern  ");   
-    // Test all 0's
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        testRow(row, 0xaa, 1);
-    }
     
-    while (1) {
-        display_logStatus("OK!    ");
-    }
+    // Recommended by Mostek at startup
+    refreshAndWait(8);
+        
+    // Test all 0's
+    display_logTest("All 0's");   
+    testAll(0, 0);
+
+    // Test all 1's
+    display_logTest("All 1's");   
+    testAll(0xff, 0);
+
+    // Test alternate bit pattern 1
+    display_logTest("0x55 pattern");   
+    testAll(0x55, 0);
+
+    // Test alternate bit pattern 2
+    display_logTest("0xAA pattern");   
+    testAll(0xAA, 0);
+
+    // Test incremental pattern
+    display_logTest("+1 pattern  ");   
+    testAll(0xaa, 1);
+    
+    display_logStatus("Test passed!");
+    while (1) { }
 }
