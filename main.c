@@ -144,13 +144,15 @@ static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
     RAS = 1;
 }
 
+static void refreshAll(BYTE row);
+static void refreshAndWait(BYTE row, short count);
+
 // Should require less than 2ms (max refresh perdiod): max 70 instructions per cell
 static void testRow(BYTE row, BYTE startData, BYTE deltaData) {    
     // Page mode read cycle
     ADDR_PORT = row;    
     NOP();  // Stabilize ADDR (long wires)
     RAS = 0;
-    WRITE = 1;
 
     BYTE data = startData;
     for (BYTE col = 0; col < ROW_SIZE; col++) {
@@ -164,10 +166,21 @@ static void testRow(BYTE row, BYTE startData, BYTE deltaData) {
         CAS = 1;
         
         if (d != data) {
-            sprintf(buf, "!R%x C%x ~%x", row, col, d);
+            // Stop row operation
+            RAS = 1;
+            // Report error and pause to let the error to be visible
+            refreshAll(row + 1);
+            sprintf(buf, "!R%2x C%2x ~%2x", row, col, d);
+            refreshAll(row + 1);
             display_logStatus(buf);
-            // stop
-            while (1);
+            
+            // Wait one second
+            refreshAndWait(row + 1, 1000);
+            // Continue the test
+
+            ADDR_PORT = row;    
+            NOP();  // Stabilize ADDR (long wires)
+            RAS = 0;
         }
         data += deltaData;
     } 
@@ -187,10 +200,10 @@ static void refreshAll(BYTE row) {
     }
 }
 
-static void refreshAndWait(BYTE c) {
-    for (BYTE i = 0; i < c; i++) {
-        refreshAll(0);
-        __delay_ms(2);
+static void refreshAndWait(BYTE row, short count) {
+    for (short i = 0; i < count; i++) {
+        refreshAll(row);
+        __delay_ms(1);
     }
 }
 
@@ -205,8 +218,8 @@ static void testAll(BYTE startData, BYTE deltaData) {
     }
 
     // Test memory persistence
-    // Wait for 256 full refresh cycles (512ms)
-    refreshAndWait(255);
+    // Wait for 512 full refresh cycles (512ms)
+    refreshAndWait(0, 512);
 
     for (BYTE row = 0; row < ROW_COUNT; row++) {
         sprintf(buf, "..R %x", row);
@@ -231,7 +244,7 @@ void main(void) {
     display_init();
     
     // Recommended by Mostek at startup
-    refreshAndWait(8);
+    refreshAndWait(0, 8);
     
     // Not initialized after reset
     while (1) {
