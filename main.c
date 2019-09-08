@@ -33,6 +33,78 @@ extern void display_logTest(const char* text);
 extern void display_logStatus(const char* text);
 
 static char buf[16];
+// Cycle after each reset
+static enum {
+    // Use the full suite to test DRAM, refresh, whole bits, all patterns, etc...
+    MODE_FULL_TEST,
+            
+    // Test a single row for continous write. 
+    // Useful to check power line noise during operations.
+    MODE_CONTINOUS_WRITE,
+            
+    // Test write/read a single cell every microsecond. Useful to trace 
+    // timings and response with an oscilloscope. Using a faulty cell it is
+    // possible to check which type of damage the chip has.
+    MODE_ONLY_BIT_0,
+
+    MODE_FIRST = MODE_FULL_TEST,
+    MODE_LAST = MODE_ONLY_BIT_0
+} persistent TEST_PROGRAM;
+
+// Write a single bit
+static void writeCell(BYTE row, BYTE col, BYTE data) {    
+    // Use early write to avoid contention: DI and DO are shorted
+    ADDR_PORT = row;    
+    NOP();  // Stabilize ADDR (long wires)
+    RAS = 0;
+    DATA_PORT_T = 0;
+
+    // Prepare both addr and data
+    ADDR_PORT = col;
+    DATA_PORT = data;
+    // Early write
+    WRITE = 0;
+    NOP();
+    NOP();
+
+    // Strobe cas and sample data
+    CAS = 0;
+    NOP();
+    NOP();
+
+    // Deassert both lines
+    WRITE = 1;
+    CAS = 1;
+
+    // End write
+    DATA_PORT_T = 0xff;
+    RAS = 1;
+}
+
+// Read a single bit
+static BYTE readCell(BYTE row, BYTE col) {    
+    ADDR_PORT = row;    
+    NOP();  // Stabilize ADDR (long wires)
+    RAS = 0;
+
+    // Prepare both addr and data
+    ADDR_PORT = col;
+    NOP();
+    NOP();
+
+    // Strobe cas and sample data
+    CAS = 0;
+    NOP();
+    NOP();
+    BYTE b = DATA_PORT;
+
+    // Deassert both lines
+    CAS = 1;
+    NOP();
+    RAS = 1;
+    
+    return b;
+}
 
 // Should require less than 2ms (max refresh perdiod): max 70 instructions per cell
 static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
@@ -48,14 +120,16 @@ static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
     DATA_PORT_T = 0;
     for (BYTE col = 0; col < ROW_SIZE; col++) {
         // Prepare both addr and data
-        ADDR_PORT = col;    
+        ADDR_PORT = col;
         DATA_PORT = data;
         // Early write
         WRITE = 0;
         NOP();
+        NOP();
 
         // Strobe cas and sample data
         CAS = 0;
+        NOP();
         NOP();
 
         // Deassert both lines
@@ -66,7 +140,7 @@ static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
     } 
 
     // End write
-    DATA_PORT_T = 1;
+    DATA_PORT_T = 0xff;
     RAS = 1;
 }
 
@@ -82,7 +156,9 @@ static void testRow(BYTE row, BYTE startData, BYTE deltaData) {
     for (BYTE col = 0; col < ROW_SIZE; col++) {
         ADDR_PORT = col;    
         NOP();  // Stabilize ADDR (long wires)
+        NOP();     
         CAS = 0;
+        NOP();     
         NOP();     
         BYTE d = DATA_PORT;
         CAS = 1;
@@ -148,35 +224,57 @@ void main(void) {
     WRITE_T = RAS_T = CAS_T = 0;  
     CAS = RAS = WRITE = 1;
     
-    DATA_PORT_T = 0xff;
-    ADDR_PORT_T = 0x00;
+    DATA_PORT_T = 0xff; // High-Z
+    ADDR_PORT_T = 0x00; // Out
     OPTION_REGbits.nRBPU = 0; // Pullup to read 1 in case of no RAM
 
     display_init();
     
     // Recommended by Mostek at startup
     refreshAndWait(8);
-        
-    // Test all 0's
-    display_logTest("All 0's");   
-    testAll(0, 0);
-
-    // Test all 1's
-    display_logTest("All 1's");   
-    testAll(0xff, 0);
-
-    // Test alternate bit pattern 1
-    display_logTest("0x55 pattern");   
-    testAll(0x55, 0);
-
-    // Test alternate bit pattern 2
-    display_logTest("0xAA pattern");   
-    testAll(0xAA, 0);
-
-    // Test incremental pattern
-    display_logTest("+1 pattern  ");   
-    testAll(0xaa, 1);
     
-    display_logStatus("Test passed!");
-    while (1) { }
+    // Not initialized after reset
+    while (1) {
+        // Get and increment for next reset
+        switch (TEST_PROGRAM++) {
+            case MODE_FULL_TEST:
+                // Test all 0's
+                display_logTest("All 0's");   
+                testAll(0, 0);
+
+                // Test all 1's
+                display_logTest("All 1's");   
+                testAll(0xff, 0);
+
+                // Test alternate bit pattern 1
+                display_logTest("0x55 pattern");   
+                testAll(0x55, 0);
+
+                // Test alternate bit pattern 2
+                display_logTest("0xAA pattern");   
+                testAll(0xAA, 0);
+
+                // Test incremental pattern
+                display_logTest("+1 pattern  ");   
+                testAll(0xaa, 1);
+
+                display_logStatus("Test passed!");
+                while (1) { }
+
+            case MODE_CONTINOUS_WRITE:
+                display_logTest("Continous write");
+                while (1) {
+                    writeRow(0, 0, 1);
+                }
+
+            case MODE_ONLY_BIT_0:
+                display_logTest("Test single bit");
+                while (1) { 
+                    writeCell(0, 0, 0xaa);
+                    __delay_ms(1);
+                    readCell(0, 0);
+                    __delay_ms(1);
+                }
+        }
+    }      
 }
