@@ -62,14 +62,13 @@ static void writeCell(BYTE row, BYTE col, BYTE data) {
     // Prepare both addr and data
     ADDR_PORT = col;
     DATA_PORT = data;
+    NOP();
     // Early write
     WRITE = 0;
-    NOP();
     NOP();
 
     // Strobe cas and sample data
     CAS = 0;
-    NOP();
     NOP();
 
     // Deassert both lines
@@ -90,11 +89,9 @@ static BYTE readCell(BYTE row, BYTE col) {
     // Prepare both addr and data
     ADDR_PORT = col;
     NOP();
-    NOP();
 
     // Strobe cas and sample data
     CAS = 0;
-    NOP();
     NOP();
     BYTE b = DATA_PORT;
 
@@ -122,14 +119,13 @@ static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
         // Prepare both addr and data
         ADDR_PORT = col;
         DATA_PORT = data;
+        NOP();
         // Early write
         WRITE = 0;
-        NOP();
         NOP();
 
         // Strobe cas and sample data
         CAS = 0;
-        NOP();
         NOP();
 
         // Deassert both lines
@@ -158,9 +154,7 @@ static void testRow(BYTE row, BYTE startData, BYTE deltaData) {
     for (BYTE col = 0; col < ROW_SIZE; col++) {
         ADDR_PORT = col;    
         NOP();  // Stabilize ADDR (long wires)
-        NOP();     
         CAS = 0;
-        NOP();     
         NOP();     
         BYTE d = DATA_PORT;
         CAS = 1;
@@ -207,7 +201,7 @@ static void refreshAndWait(BYTE row, short count) {
     }
 }
 
-static void testAll(BYTE startData, BYTE deltaData) {
+static void testAllWithRefresh(BYTE startData, BYTE deltaData) {
     for (BYTE row = 0; row < ROW_COUNT; row++) {
         sprintf(buf, "..W %x", row);
         display_logStatus(buf);
@@ -228,6 +222,16 @@ static void testAll(BYTE startData, BYTE deltaData) {
 
         // Refresh whole rows starting from the next one
         refreshAll(row + 1);
+    }
+}
+
+static void testAll(BYTE startData, BYTE deltaData) {
+    for (BYTE row = 0; row < ROW_COUNT; row++) {
+        sprintf(buf, "..W %x", row);
+        display_logStatus(buf);
+
+        writeRow(row, startData, deltaData);
+        testRow(row, startData, deltaData);
     }
 }
 
