@@ -24,7 +24,7 @@
 
 #define ROW_SIZE 128
 #define ROW_COUNT 128
-#define ROW_COUNT_MASK 128
+#define ROW_COUNT_MASK 127
 
 typedef unsigned char BYTE;
 
@@ -34,9 +34,11 @@ extern void display_logStatus(const char* text);
 
 static char buf[16];
 // Cycle after each reset
-static enum {
+typedef enum {
     // Use the full suite to test DRAM, refresh, whole bits, all patterns, etc...
-    MODE_FULL_TEST,
+    MODE_FULL_TEST_BY_PAGE,
+    // Same, but don't use page write
+    MODE_FULL_TEST_BY_BIT,
             
     // Test a single row for continous write. 
     // Useful to check power line noise during operations.
@@ -47,9 +49,10 @@ static enum {
     // possible to check which type of damage the chip has.
     MODE_ONLY_BIT_0,
 
-    MODE_FIRST = MODE_FULL_TEST,
+    MODE_FIRST = MODE_FULL_TEST_BY_PAGE,
     MODE_LAST = MODE_ONLY_BIT_0
-} persistent TEST_PROGRAM;
+} TEST_PROGRAM_t;
+static persistent TEST_PROGRAM_t s_testProgram;
 
 // Write a single bit
 static void writeCell(BYTE row, BYTE col, BYTE data) {    
@@ -104,7 +107,7 @@ static BYTE readCell(BYTE row, BYTE col) {
 }
 
 // Should require less than 2ms (max refresh perdiod): max 70 instructions per cell
-static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
+static void writeRow_page(BYTE row, BYTE startData, BYTE deltaData) {
     BYTE data = startData;
     
     // Page mode write cycle with early write
@@ -129,22 +132,59 @@ static void writeRow(BYTE row, BYTE startData, BYTE deltaData) {
         NOP();
 
         // Deassert both lines
-        WRITE = 1;
         CAS = 1;
+        WRITE = 1;
         
         data += deltaData;
     } 
 
     // End write
-    DATA_PORT_T = 0xff;
     RAS = 1;
+    DATA_PORT_T = 0xff;
+}
+
+// Should require less than 2ms (max refresh perdiod): max 70 instructions per cell
+static void writeRow_bit(BYTE row, BYTE startData, BYTE deltaData) {
+    BYTE data = startData;
+    
+    // Write mode for the whole row
+    DATA_PORT_T = 0;
+
+    for (BYTE col = 0; col < ROW_SIZE; col++) {
+        // Use early write to avoid contention: DI and DO are shorted
+        ADDR_PORT = row;    
+        NOP();  // Stabilize ADDR (long wires)
+        RAS = 0;
+
+        // Prepare both addr and data
+        ADDR_PORT = col;
+        DATA_PORT = data;
+        NOP();
+        // Early write
+        WRITE = 0;
+        NOP();
+
+        // Strobe cas and sample data
+        CAS = 0;
+        NOP();
+
+        // Deassert both lines
+        CAS = 1;
+        WRITE = 1;
+        
+        data += deltaData;
+        RAS = 1;
+    } 
+
+    // End write
+    DATA_PORT_T = 0xff;
 }
 
 static void refreshAll(BYTE row);
 static void refreshAndWait(BYTE row, short count);
 
 // Should require less than 2ms (max refresh perdiod): max 70 instructions per cell
-static void testRow(BYTE row, BYTE startData, BYTE deltaData) {    
+static void testRow_page(BYTE row, BYTE startData, BYTE deltaData) {    
     // Page mode read cycle
     ADDR_PORT = row;    
     NOP();  // Stabilize ADDR (long wires)
@@ -159,7 +199,7 @@ static void testRow(BYTE row, BYTE startData, BYTE deltaData) {
         BYTE d = DATA_PORT;
         CAS = 1;
         
-        if (d != data) {
+        if ((d & ~0x2) != (data & ~0x2)) {
             // Stop row operation
             RAS = 1;
             // Report error and pause to let the error to be visible
@@ -168,8 +208,8 @@ static void testRow(BYTE row, BYTE startData, BYTE deltaData) {
             refreshAll(row + 1);
             display_logStatus(buf);
             
-            // Wait one second
-            refreshAndWait(row + 1, 1000);
+            // Wait 0.75 second
+            refreshAndWait(row + 1, 750);
             // Continue the test
 
             ADDR_PORT = row;    
@@ -183,14 +223,14 @@ static void testRow(BYTE row, BYTE startData, BYTE deltaData) {
 
 static void refreshAll(BYTE row) {
     for (BYTE i = 0; i < ROW_COUNT; i++, row++) {
-        row = row & ROW_COUNT_MASK;
         // Do refresh
-        ADDR_PORT = row;   
+        ADDR_PORT = row & ROW_COUNT_MASK;   
         NOP();  // Stabilize ADDR (long wires)
         RAS = 0;
         NOP();
-        RAS = 1;
         NOP();
+        NOP();
+        RAS = 1;
     }
 }
 
@@ -202,10 +242,14 @@ static void refreshAndWait(BYTE row, short count) {
 }
 
 static void testAllWithRefresh(BYTE startData, BYTE deltaData) {
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        sprintf(buf, "..W %x", row);
-        display_logStatus(buf);
-        writeRow(row, startData, deltaData);
+    for (BYTE row = 0x38; row < ROW_COUNT; row++) {
+        //sprintf(buf, "..W %x", row);
+        //display_logStatus(buf);
+        if (s_testProgram == MODE_FULL_TEST_BY_PAGE) {
+            writeRow_page(row, startData, deltaData);
+        } else {
+            writeRow_bit(row, startData, deltaData);
+        }
 
         // Refresh whole rows starting from the next one
         refreshAll(row + 1);
@@ -215,24 +259,19 @@ static void testAllWithRefresh(BYTE startData, BYTE deltaData) {
     // Wait for 512 full refresh cycles (512ms)
     refreshAndWait(0, 512);
 
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        sprintf(buf, "..R %x", row);
-        display_logStatus(buf);
-        testRow(row, startData, deltaData);
+    for (BYTE row = 0x38; row < ROW_COUNT; row++) {
+        //sprintf(buf, "..R %x", row);
+        //display_logStatus(buf);
+        testRow_page(row, startData, deltaData);
 
         // Refresh whole rows starting from the next one
         refreshAll(row + 1);
     }
 }
 
-static void testAll(BYTE startData, BYTE deltaData) {
-    for (BYTE row = 0; row < ROW_COUNT; row++) {
-        sprintf(buf, "..W %x", row);
-        display_logStatus(buf);
-
-        writeRow(row, startData, deltaData);
-        testRow(row, startData, deltaData);
-    }
+static void display_testName(const char* name) {
+    sprintf(buf, "%c %s", s_testProgram == MODE_FULL_TEST_BY_PAGE ? 'P' : 'B', name);
+    display_logTest(buf);
 }
 
 void main(void) {
@@ -253,35 +292,36 @@ void main(void) {
     // Not initialized after reset
     while (1) {
         // Get and increment for next reset
-        switch (TEST_PROGRAM++) {
-            case MODE_FULL_TEST:
+        switch (++s_testProgram) {
+            case MODE_FULL_TEST_BY_PAGE:
+            case MODE_FULL_TEST_BY_BIT:
                 // Test all 0's
-                display_logTest("All 0's");   
-                testAll(0, 0);
+                display_testName("All 0's");   
+                testAllWithRefresh(0, 0);
 
                 // Test all 1's
-                display_logTest("All 1's");   
-                testAll(0xff, 0);
+                display_testName("All 1's");   
+                testAllWithRefresh(0xff, 0);
 
                 // Test alternate bit pattern 1
-                display_logTest("0x55 pattern");   
-                testAll(0x55, 0);
+                display_testName("0x55 pattern");   
+                testAllWithRefresh(0x55, 0);
 
                 // Test alternate bit pattern 2
-                display_logTest("0xAA pattern");   
-                testAll(0xAA, 0);
+                display_testName("0xAA pattern");   
+                testAllWithRefresh(0xAA, 0);
 
                 // Test incremental pattern
-                display_logTest("+1 pattern  ");   
-                testAll(0xaa, 1);
+                display_testName("+1 pattern  ");   
+                testAllWithRefresh(0xaa, 1);
 
                 display_logStatus("Test passed!");
                 while (1) { }
 
             case MODE_CONTINOUS_WRITE:
-                display_logTest("Continous write");
+                display_logTest("Continuous write");
                 while (1) {
-                    writeRow(0, 0, 1);
+                    writeRow_bit(0, 0, 1);
                 }
 
             case MODE_ONLY_BIT_0:
