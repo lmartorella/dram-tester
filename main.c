@@ -22,6 +22,7 @@
 #define WRITE PORTCbits.RC2
 #define WRITE_T TRISCbits.TRISC2
 
+// Configured for 8-bit array of 4116 chips.
 #define ROW_SIZE 128
 #define ROW_COUNT 128
 #define ROW_COUNT_MASK 127
